@@ -4,7 +4,7 @@ import './App.css'; // Import normal CSS
 
 const NAKAMA_CONFIG = {
   serverKey: 'defaultkey',
-  host: '127.0.0.1',
+  host: '98.93.176.59',
   port: '7350',
   useSSL: false,
 };
