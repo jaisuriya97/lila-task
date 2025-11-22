@@ -1,0 +1,14 @@
+{
+    "name": "nakama-tictactoe-ts",
+    "version": "1.0.0",
+    "description": "Nakama server logic for TicTacToe",
+    "main": "build/index.js",
+    "scripts": {
+        "build": "tsc",
+        "watch": "tsc -w"
+    },
+    "devDependencies": {
+        "typescript": "^4.9.5",
+        "nakama-runtime": "github:heroiclabs/nakama-common"
+    }
+}
