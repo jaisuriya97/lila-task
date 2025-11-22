@@ -1,15 +1,15 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Client } from '@heroiclabs/nakama-js';
-import './App.css'; // Import normal CSS
+import './App.css';
 
 const NAKAMA_CONFIG = {
   serverKey: 'defaultkey',
-  host: '98.93.176.59',
+  host: '3.236.209.129', // Ensure this is your AWS IP
   port: '7350',
   useSSL: false,
 };
 
-// --- SVG ICONS ---
+// --- ICONS ---
 const IconX = () => (
   <svg viewBox="0 0 100 100" className="icon-svg icon-x">
     <path d="M 25 25 L 75 75 M 75 25 L 25 75" />
@@ -20,6 +20,10 @@ const IconO = () => (
   <svg viewBox="0 0 100 100" className="icon-svg icon-o">
     <circle cx="50" cy="50" r="30" />
   </svg>
+);
+
+const Spinner = () => (
+  <div className="spinner-small" style={{ width: '20px', height: '20px', border: '2px solid #fff', borderTopColor: 'transparent', borderRadius: '50%', animation: 'spin 1s linear infinite' }}></div>
 );
 
 const FullscreenIcon = () => (
@@ -42,30 +46,24 @@ export default function App() {
     winner: null
   });
 
+  // Track pending move to show loading spinner on specific cell
+  const [pendingMove, setPendingMove] = useState(null);
 
-  // --- HELPER: UUID Generator (Works on HTTP) ---
-  const generateUUID = () => {
-    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
-      var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
-      return v.toString(16);
-    });
-  };
-  // --- NAKAMA CONNECTION ---
+  // --- NAKAMA LOGIC ---
   const initNakama = async () => {
     try {
       const client = new Client(NAKAMA_CONFIG.serverKey, NAKAMA_CONFIG.host, NAKAMA_CONFIG.port, NAKAMA_CONFIG.useSSL);
 
-      // Unique session per tab
       let deviceId = sessionStorage.getItem('deviceId');
-      // if (!deviceId) {
-      //   deviceId = crypto.randomUUID();
-      //   sessionStorage.setItem('deviceId', deviceId);
-      // }
-
       if (!deviceId) {
-        deviceId = generateUUID(); // <--- Use the helper function instead
+        // Simple UUID generator
+        deviceId = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
+          var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
+          return v.toString(16);
+        });
         sessionStorage.setItem('deviceId', deviceId);
       }
+
       const newSession = await client.authenticateDevice(deviceId, true, "Player_" + Math.floor(Math.random() * 1000));
       setSession(newSession);
 
@@ -77,6 +75,8 @@ export default function App() {
       socket.onmatchdata = (matchState) => {
         if (matchState.op_code === 2) {
           const data = JSON.parse(new TextDecoder().decode(matchState.data));
+
+          // SERVER IS AUTHORITY: Update state fully from server message
           setGameState(prev => ({
             ...prev,
             board: data.board,
@@ -84,6 +84,9 @@ export default function App() {
             winner: data.winner || (data.draw ? 'draw' : null),
             status: (data.winner || data.draw) ? 'finished' : 'playing'
           }));
+
+          // Clear pending move since server confirmed update
+          setPendingMove(null);
         }
       };
 
@@ -117,21 +120,16 @@ export default function App() {
   };
 
   const handleCellClick = (index) => {
+    // Validations
     if (gameState.status !== 'playing') return;
     if (gameState.board[index] !== 0) return;
     if (gameState.turn !== gameState.myMark) return;
+    if (pendingMove !== null) return; // Prevent double clicks
 
-    // Optimistic update
-    setGameState(prev => {
-      const newBoard = [...prev.board];
-      newBoard[index] = prev.myMark;
-      return {
-        ...prev,
-        board: newBoard,
-        turn: prev.turn === 1 ? 2 : 1
-      }
-    });
+    // 1. Set Pending State (Show spinner locally)
+    setPendingMove(index);
 
+    // 2. Send to Server (Do NOT update board yet)
     sendMove(index);
   };
 
@@ -160,7 +158,6 @@ export default function App() {
     return isMyTurn ? "Your Turn" : "Enemy Turn";
   };
 
-  // Dynamic class for the status badge color
   const getStatusClass = () => {
     if (isMyTurn) return 'status-badge p1-turn';
     if (gameState.status === 'playing') return 'status-badge p2-turn';
@@ -170,12 +167,10 @@ export default function App() {
   return (
     <div className="app-container">
 
-      {/* Top Right Controls */}
       <button className="fullscreen-btn" onClick={toggleFullscreen} title="Fullscreen">
         <FullscreenIcon />
       </button>
 
-      {/* Header */}
       <header className="header">
         <h1 className="title neon-text">NEO<span>TAC</span></h1>
         <div className={getStatusClass()}>
@@ -183,7 +178,6 @@ export default function App() {
         </div>
       </header>
 
-      {/* Game Board */}
       <div className="board-container">
         <div className="board">
           {gameState.board.map((cell, idx) => (
@@ -192,13 +186,14 @@ export default function App() {
               className={`cell ${isMyTurn && cell === 0 ? 'interactive' : ''}`}
               onClick={() => handleCellClick(idx)}
             >
+              {/* Logic: Show Icon if set, Show Spinner if pending, else Empty */}
               {cell === 1 && <IconX />}
               {cell === 2 && <IconO />}
+              {pendingMove === idx && cell === 0 && <Spinner />}
             </div>
           ))}
         </div>
 
-        {/* Overlay: Lobby / Matchmaking / Results */}
         {gameState.status !== 'playing' && (
           <div className="overlay">
             {gameState.status === 'finished' && (
@@ -222,7 +217,6 @@ export default function App() {
         )}
       </div>
 
-      {/* Footer */}
       <footer className="footer">
         {gameState.myMark ? (
           <div className="player-indicator">
