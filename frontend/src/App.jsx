@@ -4,192 +4,207 @@ import './App.css';
 
 const NAKAMA_CONFIG = {
   serverKey: 'defaultkey',
-  host: '3.236.209.129', // Ensure this is your AWS IP
+  host: '127.0.0.1',
   port: '7350',
   useSSL: false,
 };
 
-// --- ICONS ---
-const IconX = () => (
-  <svg viewBox="0 0 100 100" className="icon-svg icon-x">
-    <path d="M 25 25 L 75 75 M 75 25 L 25 75" />
-  </svg>
-);
-
-const IconO = () => (
-  <svg viewBox="0 0 100 100" className="icon-svg icon-o">
-    <circle cx="50" cy="50" r="30" />
-  </svg>
-);
-
-const Spinner = () => (
-  <div className="spinner-small" style={{ width: '20px', height: '20px', border: '2px solid #fff', borderTopColor: 'transparent', borderRadius: '50%', animation: 'spin 1s linear infinite' }}></div>
-);
-
-const FullscreenIcon = () => (
-  <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="none" stroke="currentColor" strokeWidth="2">
-    <path strokeLinecap="round" strokeLinejoin="round" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 4l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" />
-  </svg>
-);
+const IconX = () => <svg viewBox="0 0 100 100" className="icon-svg icon-x"><path d="M 20 20 L 80 80 M 80 20 L 20 80" /></svg>;
+const IconO = () => <svg viewBox="0 0 100 100" className="icon-svg icon-o"><circle cx="50" cy="50" r="35" /></svg>;
+const Spinner = () => <div className="spinner"></div>;
 
 export default function App() {
+  const [username, setUsername] = useState("");
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [isConnected, setIsConnected] = useState(false);
-  const [session, setSession] = useState(null);
-  const socketRef = useRef(null);
-  const matchIdRef = useRef(null);
+  const [scores, setScores] = useState({ wins: 0, losses: 0, draws: 0 });
 
   const [gameState, setGameState] = useState({
     board: Array(9).fill(0),
-    turn: 1,
+    activePlayerId: null,
     myMark: null,
+    usernames: {},
     status: 'lobby',
-    winner: null
+    winner: null,
+    deadline: 0
   });
 
-  // Track pending move to show loading spinner on specific cell
-  const [pendingMove, setPendingMove] = useState(null);
+  const [timeLeft, setTimeLeft] = useState("--");
+  const [gameDuration, setGameDuration] = useState("0s");
+  const [opponentName, setOpponentName] = useState("OPPONENT");
+  const [pendingIndex, setPendingIndex] = useState(null);
 
-  // --- NAKAMA LOGIC ---
-  const initNakama = async () => {
+  const sessionRef = useRef(null);
+  const socketRef = useRef(null);
+  const matchIdRef = useRef(null);
+  const matchStartRef = useRef(null);
+
+
+  const getMyId = () => sessionRef.current ? (sessionRef.current.user_id || sessionRef.current.userId) : null;
+
+  const connectToNakama = async () => {
+    if (!username.trim()) return alert("Please enter a username");
     try {
       const client = new Client(NAKAMA_CONFIG.serverKey, NAKAMA_CONFIG.host, NAKAMA_CONFIG.port, NAKAMA_CONFIG.useSSL);
 
       let deviceId = sessionStorage.getItem('deviceId');
       if (!deviceId) {
-        // Simple UUID generator
-        deviceId = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
-          var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
-          return v.toString(16);
-        });
+        deviceId = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => (Math.random() * 16 | 0).toString(16));
         sessionStorage.setItem('deviceId', deviceId);
       }
 
-      const newSession = await client.authenticateDevice(deviceId, true, "Player_" + Math.floor(Math.random() * 1000));
-      setSession(newSession);
-
+      const newSession = await client.authenticateDevice(deviceId, true, username);
+      sessionRef.current = newSession;
+      setIsLoggedIn(true);
       const socket = client.createSocket(false, false);
       await socket.connect(newSession, true);
       socketRef.current = socket;
       setIsConnected(true);
-
+      socket.ondisconnect = () => setIsConnected(false);
       socket.onmatchdata = (matchState) => {
         if (matchState.op_code === 2) {
           const data = JSON.parse(new TextDecoder().decode(matchState.data));
 
-          // SERVER IS AUTHORITY: Update state fully from server message
-          setGameState(prev => ({
-            ...prev,
-            board: data.board,
-            turn: data.turn,
-            winner: data.winner || (data.draw ? 'draw' : null),
-            status: (data.winner || data.draw) ? 'finished' : 'playing'
-          }));
+          setPendingIndex(null); 
+          if (data.usernames) {
+            const myId = getMyId();
+            const oppId = Object.keys(data.usernames).find(id => id !== myId);
+            if (oppId) setOpponentName(data.usernames[oppId]);
+          }
 
-          // Clear pending move since server confirmed update
-          setPendingMove(null);
+          setGameState(prev => {
+            const myId = getMyId();
+            let newMark = prev.myMark;
+            if (data.marks && myId && data.marks[myId]) {
+              newMark = data.marks[myId];
+            }
+
+            return {
+              ...prev,
+              board: data.board,
+              activePlayerId: data.activePlayerId,
+              usernames: data.usernames || prev.usernames,
+              marks: data.marks || prev.marks,
+              myMark: newMark,
+              winner: data.winner || (data.draw ? 'draw' : null),
+              deadline: data.deadline || prev.deadline,
+              status: (data.winner || data.draw) ? 'finished' : 'playing'
+            };
+          });
         }
       };
 
       socket.onmatchmakermatched = async (matched) => {
         const match = await socket.joinMatch(matched.match_id);
         matchIdRef.current = match.match_id;
-
-        const myId = newSession.user_id;
-        const users = matched.users.sort((a, b) => a.numeric_id - b.numeric_id);
-        const amIPlayerOne = users[0].presence.user_id === myId;
-
-        setGameState(prev => ({
-          ...prev,
-          status: 'playing',
-          myMark: amIPlayerOne ? 1 : 2,
-        }));
+        setGameDuration("0s");
+        matchStartRef.current = null;
       };
-    } catch (error) { console.error(error); }
+    } catch (e) { console.error(e); alert("Connect Failed"); }
   };
+
+  useEffect(() => {
+    if (gameState.status !== 'playing' || !gameState.deadline) return;
+    const interval = setInterval(() => {
+      const delta = Math.ceil((gameState.deadline - Date.now()) / 1000);
+      setTimeLeft(Math.max(0, delta));
+    }, 250);
+    return () => clearInterval(interval);
+  }, [gameState.deadline, gameState.status]);
+
+  useEffect(() => {
+    if (gameState.status === 'playing' && !matchStartRef.current) {
+      matchStartRef.current = Date.now();
+    } else if (gameState.status === 'finished' && matchStartRef.current) {
+      const seconds = Math.floor((Date.now() - matchStartRef.current) / 1000);
+      setGameDuration(`${seconds}s`);
+      matchStartRef.current = null;
+
+      setScores(s => {
+        if (gameState.winner === 'draw') return { ...s, draws: s.draws + 1 };
+        if (gameState.winner === gameState.myMark) return { ...s, wins: s.wins + 1 };
+        return { ...s, losses: s.losses + 1 };
+      });
+    } else if (gameState.status === 'matching') {
+      matchStartRef.current = null;
+    }
+  }, [gameState.status, gameState.winner]);
 
   const findMatch = async () => {
     setGameState(prev => ({ ...prev, status: 'matching' }));
+    setOpponentName("SEARCHING...");
     await socketRef.current.addMatchmaker("*", 2, 2);
   };
 
-  const sendMove = async (index) => {
-    const opCode = 1;
-    if (socketRef.current) {
-      await socketRef.current.sendMatchState(matchIdRef.current, opCode, JSON.stringify({ index }));
-    }
-  };
-
   const handleCellClick = (index) => {
-    // Validations
     if (gameState.status !== 'playing') return;
     if (gameState.board[index] !== 0) return;
-    if (gameState.turn !== gameState.myMark) return;
-    if (pendingMove !== null) return; // Prevent double clicks
 
-    // 1. Set Pending State (Show spinner locally)
-    setPendingMove(index);
+    const myId = getMyId();
+    if (gameState.activePlayerId !== myId) return;
+    if (pendingIndex !== null) return;
 
-    // 2. Send to Server (Do NOT update board yet)
-    sendMove(index);
+    setPendingIndex(index);
+    socketRef.current.sendMatchState(matchIdRef.current, 1, JSON.stringify({ index }));
   };
 
-  const toggleFullscreen = () => {
-    if (!document.fullscreenElement) {
-      document.documentElement.requestFullscreen().catch((e) => console.log(e));
-    } else {
-      if (document.exitFullscreen) {
-        document.exitFullscreen();
-      }
-    }
-  };
 
-  useEffect(() => { initNakama(); }, []);
-
-  // --- RENDER HELPERS ---
-  const isMyTurn = gameState.status === 'playing' && gameState.turn === gameState.myMark;
 
   const getStatusText = () => {
     if (gameState.status === 'lobby') return "Online Multiplayer";
-    if (gameState.status === 'matching') return "Scanning...";
-    if (gameState.status === 'finished') {
-      if (gameState.winner === 'draw') return "Draw Game";
-      return gameState.winner === gameState.myMark ? "Victory" : "Defeat";
-    }
-    return isMyTurn ? "Your Turn" : "Enemy Turn";
+    if (gameState.status === 'matching') return "Searching...";
+    if (gameState.status === 'finished') return "GAME OVER";
+
+    const myId = getMyId();
+    if (gameState.activePlayerId === myId) return "YOUR TURN";
+
+    const opponentId = Object.keys(gameState.usernames).find(id => id !== myId);
+    const name = gameState.usernames[opponentId];
+    return name ? `${name}'s TURN` : "OPPONENT'S TURN";
   };
 
-  const getStatusClass = () => {
-    if (isMyTurn) return 'status-badge p1-turn';
-    if (gameState.status === 'playing') return 'status-badge p2-turn';
-    return 'status-badge';
-  };
+  if (!isLoggedIn) {
+    return (
+      <div className="app-container">
+        <div className="header"><h1 className="title">Tic-Tac-Toe</h1></div>
+        <div className="login-container">
+          <h2>Enter Name</h2>
+          <input type="text" className="login-input" placeholder="What they call you ?" value={username} onChange={(e) => setUsername(e.target.value)} />
+          <button className="btn-primary" onClick={connectToNakama}>START</button>
+        </div>
+      </div>
+    );
+  }
+
+  const isMyTurn = gameState.status === 'playing' && gameState.activePlayerId === getMyId();
 
   return (
     <div className="app-container">
+      <header className="header"><h1 className="title">Tic-Tac-Toe</h1></header>
 
-      <button className="fullscreen-btn" onClick={toggleFullscreen} title="Fullscreen">
-        <FullscreenIcon />
-      </button>
-
-      <header className="header">
-        <h1 className="title neon-text">NEO<span>TAC</span></h1>
-        <div className={getStatusClass()}>
-          {getStatusText()}
+      <div className="info-bar">
+        <div className="player-info">
+          <div className="player-name">{username} (You)</div>
+          <div className="score">W:{scores.wins} L:{scores.losses} D:{scores.draws}</div>
         </div>
-      </header>
+        <div className={`timer-box ${timeLeft < 10 && gameState.status === 'playing' ? 'warning' : ''}`}>
+          {gameState.status === 'playing' ? timeLeft : '--'}
+        </div>
+        <div className="player-info" style={{ alignItems: 'flex-end' }}>
+          <div className="player-name">{opponentName}</div>
+          <div className="score" style={{ fontWeight: 'bold', color: isMyTurn ? '#4caf50' : '#666' }}>
+            {getStatusText()}
+          </div>
+        </div>
+      </div>
 
       <div className="board-container">
         <div className="board">
           {gameState.board.map((cell, idx) => (
-            <div
-              key={idx}
-              className={`cell ${isMyTurn && cell === 0 ? 'interactive' : ''}`}
-              onClick={() => handleCellClick(idx)}
-            >
-              {/* Logic: Show Icon if set, Show Spinner if pending, else Empty */}
+            <div key={idx} className={`cell ${isMyTurn && cell === 0 ? 'interactive' : ''}`} onClick={() => handleCellClick(idx)}>
               {cell === 1 && <IconX />}
               {cell === 2 && <IconO />}
-              {pendingMove === idx && cell === 0 && <Spinner />}
+              {pendingIndex === idx && <Spinner />}
             </div>
           ))}
         </div>
@@ -197,39 +212,29 @@ export default function App() {
         {gameState.status !== 'playing' && (
           <div className="overlay">
             {gameState.status === 'finished' && (
-              <div className="result-text">
-                {gameState.winner === gameState.myMark ? "🎉 Victory" : gameState.winner === 'draw' ? "🤝 Draw" : "💀 Defeat"}
-              </div>
+              <>
+                <div className="result-title" style={{ color: gameState.winner === gameState.myMark ? '#4caf50' : '#f44336' }}>
+                  {gameState.winner === gameState.myMark ? "VICTORY" : gameState.winner === 'draw' ? "DRAW" : "DEFEAT"}
+                </div>
+                <div className="stats-grid">
+                  <div><span className="stat-label">Time</span><span className="stat-value">{gameDuration}</span></div>
+                  <div><span className="stat-label">Result</span><span className="stat-value">{gameState.winner === 'draw' ? 'D' : gameState.winner === gameState.myMark ? 'W' : 'L'}</span></div>
+                </div>
+              </>
             )}
-
-            <button
-              className="btn-primary"
-              onClick={findMatch}
-              disabled={!isConnected || gameState.status === 'matching'}
-            >
-              {gameState.status === 'matching' ? (
-                <>
-                  <span className="spinner"></span> Finding Match...
-                </>
-              ) : gameState.status === 'finished' ? 'Play Again' : 'Find Match'}
+            <button className="btn-primary" onClick={findMatch} disabled={!isConnected || gameState.status === 'matching'}>
+              {gameState.status === 'matching' ? <><Spinner /> Searching...</> : gameState.status === 'finished' ? 'PLAY AGAIN' : 'FIND MATCH'}
             </button>
           </div>
         )}
       </div>
 
       <footer className="footer">
-        {gameState.myMark ? (
-          <div className="player-indicator">
-            PLAYING AS <span className={gameState.myMark === 2 ? 'o' : ''}>{gameState.myMark === 1 ? "X" : "O"}</span>
-          </div>
-        ) : (
-          <div className="connection-status">
-            <span className={`dot ${isConnected ? 'online' : ''}`}></span>
-            {isConnected ? "SERVER ONLINE" : "CONNECTING..."}
-          </div>
-        )}
+        <div className="connection-status">
+          <span className={`dot ${isConnected ? 'online' : ''}`}></span>
+          {isConnected ? "Connected" : "Disconnected"}
+        </div>
       </footer>
-
     </div>
   );
 }

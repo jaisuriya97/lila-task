@@ -52,5 +52,13 @@ services:
       timeout: 5s
       retries: 5
 
+  frontend:
+    image: nginx:alpine
+    restart: always
+    ports:
+      - "80:80"
+    volumes:
+      - ./frontend/dist:/usr/share/nginx/html
+
 volumes:
   data:
